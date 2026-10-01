@@ -162,7 +162,7 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 # Main Area: Title and Tabs
 # ---------------------------------------------------------------------------
 
-st.title("📊 Inbound Quality Score Viewer")
+st.title("📊 Inbound Quality Dashboard")
 
 if st.session_state.scored_df is None:
     st.info(
@@ -361,8 +361,8 @@ else:
         if filtered_df.empty:
             st.info("No records match the current filter criteria.")
         else:
-            # Search bars and display mode on the same row
-            search_id_col, search_name_col, mode_col = st.columns([1, 2, 3])
+            # Search bars, tier filter and display mode on the same row
+            search_id_col, search_name_col, tier_filter_col, mode_col, export_col = st.columns([1, 1.5, 0.8, 3, 1])
             with search_id_col:
                 search_id = st.text_input(
                     "Vendor/Seller ID",
@@ -371,14 +371,22 @@ else:
                 )
             with search_name_col:
                 search_name = st.text_input(
-                    "Vendor/Seller Name",
+                    "Name",
                     placeholder="Partial name...",
                     key="detail_search_name",
+                )
+            with tier_filter_col:
+                tier_filter = st.multiselect(
+                    "Tier",
+                    options=["A", "B", "C", "D"],
+                    default=[],
+                    placeholder="All tiers",
+                    key="detail_tier_filter",
                 )
             with mode_col:
                 display_mode = st.radio(
                     "mode",
-                    options=["Score", "Percentage", "Actual Cases"],
+                    options=["Score", "Percentage", "Actual Cases", "Dollar Amount"],
                     horizontal=True,
                     key="detail_display_mode",
                     label_visibility="collapsed",
@@ -386,6 +394,10 @@ else:
 
             # Apply search filters
             display_filtered_df = filtered_df.copy()
+            if tier_filter:
+                display_filtered_df = display_filtered_df[
+                    display_filtered_df["tier"].isin(tier_filter)
+                ]
             if search_id:
                 display_filtered_df = display_filtered_df[
                     display_filtered_df["vendor_id"].astype(str) == search_id.strip()
@@ -439,7 +451,7 @@ else:
                         display_name = CRITERIA_DISPLAY.get(criteria, criteria)
                         rename_map[col] = f"{display_name} (%)"
 
-            else:  # Actual Cases
+            elif display_mode == "Actual Cases":
                 # Show raw numerator quantities + qty_received as context
                 criteria_cols = ["qty_received"]
                 qty_col_map = {
@@ -463,6 +475,26 @@ else:
                     else:
                         rename_map[col] = f"{display_name} (qty)"
 
+            else:  # Dollar Amount
+                # Show SUM(sku_qty × avg_cost) per criteria — total_inbound_cost replaces qty
+                # spec_image_error, packaging_error, po_error, responsiveness have no dollar equivalent
+                criteria_cols = ["total_inbound_cost"]
+                rename_map["total_inbound_cost"] = "Total Inbound Cost ($)"
+                cost_col_map = {
+                    "damage": "damage_cost",
+                    "exp_error": "exp_cost",
+                    "overage": "overage_cost",
+                    "no_data": "no_data_cost",
+                    "upc_error": "upc_cost",
+                    "poor_quality": "poor_quality_cost",
+                }
+                for criteria in CRITERIA_NAMES:
+                    if criteria in cost_col_map:
+                        col = cost_col_map[criteria]
+                        criteria_cols.append(col)
+                        display_name = CRITERIA_DISPLAY.get(criteria, criteria)
+                        rename_map[col] = f"{display_name} ($)"
+
             # Assemble display columns
             display_cols = base_cols + criteria_cols
 
@@ -478,6 +510,13 @@ else:
                         if col in detail_df.columns:
                             detail_df[col] = (detail_df[col] * 100).round(2)
 
+            # For Dollar Amount mode, round cost columns to 2 decimal places (keep numeric for sorting)
+            if display_mode == "Dollar Amount":
+                for col in ["total_inbound_cost", "damage_cost", "exp_cost",
+                            "overage_cost", "no_data_cost", "upc_cost", "poor_quality_cost"]:
+                    if col in detail_df.columns:
+                        detail_df[col] = detail_df[col].round(2)
+
             detail_df = detail_df.rename(columns=rename_map)
 
             # Sort by Tier (A first) then Score descending
@@ -488,9 +527,25 @@ else:
                     ["_tier_rank", "Score"], ascending=[True, False]
                 ).drop(columns=["_tier_rank"])
 
+            # --- Export CSV button (top-right corner, rendered after detail_df is ready) ---
+            csv_export = detail_df.to_csv(index=False).encode("utf-8-sig")
+            mode_label = display_mode.lower().replace(" ", "_")
+            with export_col:
+                st.write("")  # vertical alignment
+                st.write("")
+                st.download_button(
+                    label="⬇️ Export to CSV",
+                    data=csv_export,
+                    file_name=f"inbound_quality_{mode_label}.csv",
+                    mime="text/csv",
+                    key="detail_csv_export",
+                )
+
             # Determine number of pinned (frozen) columns based on display mode
             if display_mode == "Actual Cases":
                 num_pinned = 7
+            elif display_mode == "Dollar Amount":
+                num_pinned = 7  # base_cols(6) + Total Inbound Cost
             else:
                 num_pinned = 6
 
@@ -507,14 +562,32 @@ else:
                 "Type": 70,
                 "Team": 80,
                 "Qty Received (units)": 110,
+                "Total Inbound Cost ($)": 150,
             }
+
+            dollar_formatter = "'$' + (value != null ? value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '0.00')"
+
             for i, col in enumerate(detail_df.columns[:num_pinned]):
                 w = col_widths.get(col, 100)
-                gb.configure_column(col, pinned="left", width=w)
+                if display_mode == "Dollar Amount" and col == "Total Inbound Cost ($)":
+                    gb.configure_column(col, pinned="left", width=w,
+                                        type=["numericColumn"],
+                                        cellStyle={"textAlign": "right"},
+                                        valueFormatter=dollar_formatter)
+                else:
+                    gb.configure_column(col, pinned="left", width=w)
 
             # Right-align numeric data columns (criteria scores/percentages/quantities)
             for col in detail_df.columns[num_pinned:]:
-                gb.configure_column(col, type=["numericColumn"], cellStyle={"textAlign": "right"})
+                if display_mode == "Dollar Amount":
+                    gb.configure_column(
+                        col,
+                        type=["numericColumn"],
+                        cellStyle={"textAlign": "right"},
+                        valueFormatter="'$' + (value != null ? value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '0.00')",
+                    )
+                else:
+                    gb.configure_column(col, type=["numericColumn"], cellStyle={"textAlign": "right"})
 
             # Set compact row height
             gb.configure_grid_options(domLayout="normal", rowHeight=30, headerHeight=32)

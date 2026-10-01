@@ -101,7 +101,8 @@ SELECT
     SUM(bb.quantity) AS qty_received,
     COUNT(bb.item_number) AS po_sku_received,
     SUM(bb.weight_error) AS spec_image_error,
-    SUM(CASE WHEN bb.problem_report IS NOT NULL AND bb.problem_report != '' THEN 1 ELSE 0 END) AS packaging_error
+    SUM(CASE WHEN bb.problem_report IS NOT NULL AND bb.problem_report != '' THEN 1 ELSE 0 END) AS packaging_error,
+    SUM(bb.quantity * COALESCE(bb.avg_cost, 0)) AS total_inbound_cost
 FROM (
     SELECT
         ib.reference_id,
@@ -114,6 +115,7 @@ FROM (
         ibb.image_error,
         ibb.weight_error,
         ibb.problem_report,
+        pac.avg_cost,
         CASE
             WHEN c1.category_id IN (1, 301, 310) THEN 'Food'
             WHEN c1.category_id IN (2, 7, 10, 11, 320, 334, 342, 350) THEN 'Non-food'
@@ -127,12 +129,17 @@ FROM (
     LEFT JOIN yamibuy_im.im_category c3 ON c3.category_id = ii.category_id
     LEFT JOIN yamibuy_im.im_category c2 ON c2.category_id = c3.parent_category_id
     LEFT JOIN yamibuy_im.im_category c1 ON c1.category_id = c2.parent_category_id
+    LEFT JOIN yamibuy_po.po_item_avg_cost pac
+        ON pac.item_number = ibb.item_number AND pac.warehouse_number = ib.warehouse_number
     WHERE ib.reference_id NOT LIKE 'F%'
       AND ibb.item_number NOT LIKE '8%'
       AND {date_clause}
       {wh_filter}
 ) bb
 WHERE bb.vendor_name IS NOT NULL
+  AND bb.vendor_name NOT LIKE '%测试%'
+  AND bb.vendor_name NOT LIKE '%test%'
+  AND bb.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3, 4
 """
 
@@ -151,7 +158,8 @@ SELECT
     SUM(bb.quantity) AS qty_received,
     COUNT(bb.item_number) AS po_sku_received,
     SUM(CASE WHEN bb.weight_error = 1 OR bb.image_error = 1 THEN 1 ELSE 0 END) AS spec_image_error,
-    SUM(CASE WHEN bb.problem_report IS NOT NULL AND bb.problem_report != '' THEN 1 ELSE 0 END) AS packaging_error
+    SUM(CASE WHEN bb.problem_report IS NOT NULL AND bb.problem_report != '' THEN 1 ELSE 0 END) AS packaging_error,
+    SUM(bb.quantity * COALESCE(bb.avg_cost, 0)) AS total_inbound_cost
 FROM (
     SELECT
         ib.reference_id,
@@ -163,16 +171,22 @@ FROM (
         wss.seller_id AS vendor_id,
         ibb.image_error,
         ibb.weight_error,
-        ibb.problem_report
+        ibb.problem_report,
+        pac.avg_cost
     FROM yamibuy_wh.wh_inbound_batch ibb
     LEFT JOIN yamibuy_wh.wh_inbound ib ON ib.inbound_number = ibb.inbound_number
     LEFT JOIN yamibuy_wh.wh_seller_shipment wss ON wss.shipment_id = ib.reference_id
     LEFT JOIN yamibuy_master.xysc_vendor_info seller ON seller.vendor_id = wss.seller_id
+    LEFT JOIN yamibuy_po.po_item_avg_cost pac
+        ON pac.item_number = ibb.item_number AND pac.warehouse_number = ib.warehouse_number
     WHERE ib.reference_id LIKE 'F%'
       AND {date_clause}
       {wh_filter}
 ) bb
 WHERE bb.vendor_name IS NOT NULL
+  AND bb.vendor_name NOT LIKE '%测试%'
+  AND bb.vendor_name NOT LIKE '%test%'
+  AND bb.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3, 4
 """
 
@@ -190,16 +204,25 @@ SELECT
     SUM(CASE WHEN bpm.problem_type = 3 THEN bpm.item_qty ELSE 0 END) AS damage_qty,
     SUM(CASE WHEN bpm.problem_type IN (5, 6) THEN bpm.item_qty ELSE 0 END) AS upc_qty,
     SUM(CASE WHEN bpm.problem_type IN (1, 2) THEN bpm.item_qty ELSE 0 END) AS exp_qty,
-    SUM(CASE WHEN bpm.problem_type IN (7, 8, 9) THEN bpm.item_qty ELSE 0 END) AS po_qty,
-    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty ELSE 0 END) AS no_data_qty
+    SUM(CASE WHEN bpm.problem_type IN (7, 8, 9) THEN 1 ELSE 0 END) AS po_qty,
+    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty ELSE 0 END) AS no_data_qty,
+    SUM(CASE WHEN bpm.problem_type = 4 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS overage_cost,
+    SUM(CASE WHEN bpm.problem_type = 3 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS damage_cost,
+    SUM(CASE WHEN bpm.problem_type IN (5, 6) THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS upc_cost,
+    SUM(CASE WHEN bpm.problem_type IN (1, 2) THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS exp_cost,
+    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS no_data_cost
 FROM yamibuy_wh.wh_problem_solving_bpm bpm
 LEFT JOIN yamibuy_po.po_vendor pv ON pv.vendor_id = bpm.vendor_id
+LEFT JOIN yamibuy_po.po_item_avg_cost pac
+    ON pac.item_number = bpm.item_number AND pac.warehouse_number = bpm.warehouse_number
 WHERE bpm.create_type = 1
   AND bpm.business_type = 1
   AND {date_clause}
   {wh_filter}
   AND pv.vendor_name IS NOT NULL
   AND pv.vendor_name NOT LIKE '%测试%'
+  AND pv.vendor_name NOT LIKE '%test%'
+  AND pv.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3
 """
 
@@ -217,16 +240,25 @@ SELECT
     SUM(CASE WHEN bpm.problem_type = 3 THEN bpm.item_qty ELSE 0 END) AS damage_qty,
     SUM(CASE WHEN bpm.problem_type IN (5, 6) THEN bpm.item_qty ELSE 0 END) AS upc_qty,
     SUM(CASE WHEN bpm.problem_type IN (1, 2) THEN bpm.item_qty ELSE 0 END) AS exp_qty,
-    SUM(CASE WHEN bpm.problem_type IN (7, 8, 9) THEN bpm.item_qty ELSE 0 END) AS po_qty,
-    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty ELSE 0 END) AS no_data_qty
+    SUM(CASE WHEN bpm.problem_type IN (7, 8, 9) THEN 1 ELSE 0 END) AS po_qty,
+    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty ELSE 0 END) AS no_data_qty,
+    SUM(CASE WHEN bpm.problem_type = 4 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS overage_cost,
+    SUM(CASE WHEN bpm.problem_type = 3 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS damage_cost,
+    SUM(CASE WHEN bpm.problem_type IN (5, 6) THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS upc_cost,
+    SUM(CASE WHEN bpm.problem_type IN (1, 2) THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS exp_cost,
+    SUM(CASE WHEN bpm.problem_type = 10 THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS no_data_cost
 FROM yamibuy_wh.wh_problem_solving_bpm bpm
 LEFT JOIN yamibuy_master.xysc_vendor_info seller ON seller.vendor_id = bpm.vendor_id
+LEFT JOIN yamibuy_po.po_item_avg_cost pac
+    ON pac.item_number = bpm.item_number AND pac.warehouse_number = bpm.warehouse_number
 WHERE bpm.create_type = 1
   AND bpm.business_type = 5
   AND {date_clause}
   {wh_filter}
   AND seller.vendor_name IS NOT NULL
   AND seller.vendor_name NOT LIKE '%测试%'
+  AND seller.vendor_name NOT LIKE '%test%'
+  AND seller.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3
 """
 
@@ -240,16 +272,21 @@ SELECT
     pv.vendor_name,
     bpm.vendor_id,
     'Vendor' AS business_type,
-    SUM(CASE WHEN bpm.comment LIKE '%quality%' THEN bpm.item_qty ELSE 0 END) AS poor_quality_qty
+    SUM(CASE WHEN bpm.comment LIKE '%poor quality%' THEN bpm.item_qty ELSE 0 END) AS poor_quality_qty,
+    SUM(CASE WHEN bpm.comment LIKE '%poor quality%' THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS poor_quality_cost
 FROM yamibuy_wh.wh_problem_solving_bpm bpm
 LEFT JOIN yamibuy_po.po_vendor pv ON pv.vendor_id = bpm.vendor_id
+LEFT JOIN yamibuy_po.po_item_avg_cost pac
+    ON pac.item_number = bpm.item_number AND pac.warehouse_number = bpm.warehouse_number
 WHERE bpm.create_type = 2
   AND bpm.business_type = 1
-  AND bpm.problem_type = 3
+  AND bpm.problem_type IN (3, 6)
   AND {date_clause}
   {wh_filter}
   AND pv.vendor_name IS NOT NULL
   AND pv.vendor_name NOT LIKE '%测试%'
+  AND pv.vendor_name NOT LIKE '%test%'
+  AND pv.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3
 """
 
@@ -263,16 +300,21 @@ SELECT
     seller.vendor_name,
     bpm.vendor_id,
     'Seller' AS business_type,
-    SUM(CASE WHEN bpm.comment LIKE '%quality%' THEN bpm.item_qty ELSE 0 END) AS poor_quality_qty
+    SUM(CASE WHEN bpm.comment LIKE '%poor quality%' THEN bpm.item_qty ELSE 0 END) AS poor_quality_qty,
+    SUM(CASE WHEN bpm.comment LIKE '%poor quality%' THEN bpm.item_qty * COALESCE(pac.avg_cost, 0) ELSE 0 END) AS poor_quality_cost
 FROM yamibuy_wh.wh_problem_solving_bpm bpm
 LEFT JOIN yamibuy_master.xysc_vendor_info seller ON seller.vendor_id = bpm.vendor_id
+LEFT JOIN yamibuy_po.po_item_avg_cost pac
+    ON pac.item_number = bpm.item_number AND pac.warehouse_number = bpm.warehouse_number
 WHERE bpm.create_type = 2
   AND bpm.business_type = 5
-  AND bpm.problem_type = 3
+  AND bpm.problem_type IN (3, 6)
   AND {date_clause}
   {wh_filter}
   AND seller.vendor_name IS NOT NULL
   AND seller.vendor_name NOT LIKE '%测试%'
+  AND seller.vendor_name NOT LIKE '%test%'
+  AND seller.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3
 """
 
@@ -300,6 +342,8 @@ WHERE bpm.business_type = 5
   {wh_filter}
   AND seller.vendor_name IS NOT NULL
   AND seller.vendor_name NOT LIKE '%测试%'
+  AND seller.vendor_name NOT LIKE '%test%'
+  AND seller.vendor_name NOT LIKE '%testing%'
 GROUP BY 1, 2, 3
 """
 
@@ -375,6 +419,7 @@ def _compute_rates(inbound_df: pd.DataFrame, bpm_df: pd.DataFrame,
             "po_sku_received": "sum",
             "spec_image_error": "sum",
             "packaging_error": "sum",
+            "total_inbound_cost": "sum",
         })
     )
     # Re-attach the dominant team
@@ -386,7 +431,8 @@ def _compute_rates(inbound_df: pd.DataFrame, bpm_df: pd.DataFrame,
     df = inbound_agg.merge(
         bpm_df[merge_keys + [
             "overage_qty", "damage_qty", "upc_qty",
-            "exp_qty", "po_qty", "no_data_qty"
+            "exp_qty", "po_qty", "no_data_qty",
+            "overage_cost", "damage_cost", "upc_cost", "exp_cost", "no_data_cost",
         ]],
         on=merge_keys,
         how="left",
@@ -394,7 +440,7 @@ def _compute_rates(inbound_df: pd.DataFrame, bpm_df: pd.DataFrame,
 
     # Merge QC data onto combined dataframe
     df = df.merge(
-        qc_df[merge_keys + ["poor_quality_qty"]],
+        qc_df[merge_keys + ["poor_quality_qty", "poor_quality_cost"]],
         on=merge_keys,
         how="left",
     )
@@ -404,21 +450,27 @@ def _compute_rates(inbound_df: pd.DataFrame, bpm_df: pd.DataFrame,
         "overage_qty", "damage_qty", "upc_qty",
         "exp_qty", "po_qty", "no_data_qty", "poor_quality_qty",
     ]
+    cost_cols = [
+        "overage_cost", "damage_cost", "upc_cost",
+        "exp_cost", "no_data_cost", "poor_quality_cost",
+    ]
     df[numerator_cols] = df[numerator_cols].fillna(0)
+    df[cost_cols] = df[cost_cols].fillna(0)
 
     # Compute rates — criteria 1-6, 9 use qty_received as denominator
     # Handle division by zero: if qty_received is 0, rate stays 0
     qty = df["qty_received"].replace(0, pd.NA)
+    # Criteria 7-8 and po_error use po_sku_received as denominator
+    sku_qty = df["po_sku_received"].replace(0, pd.NA)
+
     df["overage_rate"] = (df["overage_qty"] / qty).fillna(0)
     df["damage_rate"] = (df["damage_qty"] / qty).fillna(0)
     df["upc_error_rate"] = (df["upc_qty"] / qty).fillna(0)
     df["exp_error_rate"] = (df["exp_qty"] / qty).fillna(0)
-    df["po_error_rate"] = (df["po_qty"] / qty).fillna(0)
+    df["po_error_rate"] = (df["po_qty"] / sku_qty).fillna(0)
     df["no_data_rate"] = (df["no_data_qty"] / qty).fillna(0)
     df["poor_quality_rate"] = (df["poor_quality_qty"] / qty).fillna(0)
 
-    # Criteria 7-8 use po_sku_received as denominator
-    sku_qty = df["po_sku_received"].replace(0, pd.NA)
     df["spec_image_error_rate"] = (df["spec_image_error"] / sku_qty).fillna(0)
     df["packaging_error_rate"] = (df["packaging_error"] / sku_qty).fillna(0)
 
@@ -458,12 +510,233 @@ def _select_output_columns(df: pd.DataFrame) -> pd.DataFrame:
         "spec_image_error",
         "packaging_error",
         "poor_quality_qty",
+        # Dollar Amount columns (SKU qty × avg_cost, summed per vendor)
+        "total_inbound_cost",
+        "overage_cost",
+        "damage_cost",
+        "upc_cost",
+        "exp_cost",
+        "no_data_cost",
+        "poor_quality_cost",
+        # Cost column for "Dollar Amount" display mode
+        "avg_unit_cost",
     ]
     # Ensure all columns exist
     for col in output_columns:
         if col not in df.columns:
             df[col] = 0
     return df[output_columns].copy()
+
+
+def _get_athena_connection():
+    """
+    Create Athena connection using SSO profile.
+    Requires active SSO session (aws sso login --profile prod-ziyi.fang-406921510350).
+    """
+    import boto3
+    from pyathena import connect
+
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+    session = boto3.Session(profile_name="prod-ziyi.fang-406921510350")
+    credentials = session.get_credentials().get_frozen_credentials()
+
+    return connect(
+        aws_access_key_id=credentials.access_key,
+        aws_secret_access_key=credentials.secret_key,
+        aws_session_token=credentials.token,
+        region_name=os.getenv("ATHENA_REGION", "us-west-2"),
+        work_group=os.getenv("ATHENA_WORK_GROUP", "ziyi.fang"),
+        s3_staging_dir=os.getenv("ATHENA_S3_STAGING", "s3://aws-athena-query-results-us-west-2-654654218498/"),
+    )
+
+
+def _load_seller_am_from_athena() -> pd.DataFrame:
+    """
+    Load seller-AM mapping from Athena (yamibuy_central.admin_seller).
+    On success, caches to local CSV. On failure, reads from cache.
+
+    Returns DataFrame with columns: seller_id, user_id, am_name
+    """
+    cache_dir = Path(__file__).parent / "cache"
+    cache_file = cache_dir / "seller_am.csv"
+
+    # Try Athena
+    try:
+        athena_conn = _get_athena_connection()
+        df = pd.read_sql("""
+            SELECT a.seller_id, a.user_id, u.user_name AS am_name
+            FROM yamibuy_central.admin_seller a
+            LEFT JOIN yamibuy_master.xysc_admin_user u ON u.user_id = a.user_id
+        """, athena_conn)
+
+        # Cache to local CSV
+        cache_dir.mkdir(exist_ok=True)
+        df.to_csv(cache_file, index=False)
+        return df
+
+    except Exception:
+        # Fallback to cached CSV
+        if cache_file.exists():
+            return pd.read_csv(cache_file)
+        return pd.DataFrame(columns=["seller_id", "user_id", "am_name"])
+
+
+def _load_owner_info(engine, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load PM (for Vendor) and AM (for Seller) owner info.
+
+    Each vendor/seller gets exactly ONE owner assigned:
+    - Vendor: from po_pm_vendor + po_pm_team (domain-aware matching)
+      Logic: match vendor's team (Food/Non-food) to PM's domain (0=Food, 1=Non-food)
+      Priority: is_primary=1 in matching domain > any PM in matching domain > is_primary=1 any domain > first PM
+    - Seller: from Athena admin_seller (real-time, with CSV cache fallback)
+
+    Adds column: pm_am (str) — the single PM or AM name
+    """
+    df["pm_am"] = ""
+
+    def _normalize_am_name(name):
+        """Normalize AM name to first-name only, lowercase.
+        'jax.qian' → 'jax', 'irene.yu' → 'irene', 'Celia.Liang' → 'celia'
+        """
+        if not name or not isinstance(name, str):
+            return ""
+        name = name.strip().lower()
+        name = name.split("@")[0]
+        if "." in name:
+            return name.split(".")[0]
+        elif " " in name:
+            return name.split(" ")[0]
+        return name
+
+    with engine.connect() as conn:
+        # --- Vendor PM (domain-aware) ---
+        vendor_ids = df.loc[df["business_type"] == "Vendor", "vendor_id"].unique()
+        if len(vendor_ids) > 0:
+            # Join po_pm_vendor + im_pm + po_pm_team to get domain info
+            pm_df = pd.read_sql(text("""
+                SELECT pv.vendor_id, pm.PM_name AS pm_name, pv.is_primary, pt.domain
+                FROM yamibuy_po.po_pm_vendor pv
+                JOIN yamibuy_im.im_pm pm ON pm.PM_id = CAST(pv.pm_id AS CHAR)
+                LEFT JOIN yamibuy_po.po_pm_team pt ON pt.pm_id = pm.PM_id AND pt.deleted = 0
+                WHERE pv.deleted = 0 AND pm.status = 'A'
+            """), conn)
+
+            if not pm_df.empty:
+                # Deduplicate (LEFT JOIN on po_pm_team can produce dupes if PM has multiple team rows)
+                pm_df = pm_df.drop_duplicates(subset=["vendor_id", "pm_name", "domain"])
+
+                vendor_mask = df["business_type"] == "Vendor"
+                # Map team to domain: Food→0, Non-food→1
+                team_to_domain = {"Food": 0, "Non-food": 1, "Other": None}
+
+                for vid in df.loc[vendor_mask, "vendor_id"].unique():
+                    vid_rows = pm_df[pm_df["vendor_id"] == vid]
+                    if vid_rows.empty:
+                        continue
+
+                    # Get this vendor's team/domain
+                    vendor_team = df.loc[vendor_mask & (df["vendor_id"] == vid), "team"].iloc[0]
+                    target_domain = team_to_domain.get(vendor_team)
+
+                    pm_name = None
+
+                    if target_domain is not None:
+                        # 1. Primary PM in matching domain
+                        match = vid_rows[(vid_rows["domain"] == target_domain) & (vid_rows["is_primary"] == 1)]
+                        if not match.empty:
+                            pm_name = match.iloc[0]["pm_name"]
+                        else:
+                            # 2. Any PM in matching domain
+                            match = vid_rows[vid_rows["domain"] == target_domain]
+                            if not match.empty:
+                                pm_name = sorted(match["pm_name"].unique())[0]
+
+                    if pm_name is None:
+                        # 3. Primary PM in any domain
+                        match = vid_rows[vid_rows["is_primary"] == 1]
+                        if not match.empty:
+                            pm_name = match.iloc[0]["pm_name"]
+                        else:
+                            # 4. First PM alphabetically
+                            pm_name = sorted(vid_rows["pm_name"].unique())[0]
+
+                    df.loc[vendor_mask & (df["vendor_id"] == vid), "pm_am"] = pm_name
+
+            # Fallback for vendors with no PM record at all
+            no_pm_mask = vendor_mask & ((df["pm_am"] == "") | df["pm_am"].isna())
+            if no_pm_mask.any():
+                df.loc[no_pm_mask & (df["team"] == "Food"), "pm_am"] = "janelle.zhang"
+                df.loc[no_pm_mask & (df["team"] == "Non-food"), "pm_am"] = "jillian.ji"
+                df.loc[no_pm_mask & (df["team"] == "Other"), "pm_am"] = "janelle.zhang"
+
+    # --- Seller AM (from Athena dwb_bi_vendor_region_info + admin_seller fallback) ---
+    seller_ids = df.loc[df["business_type"] == "Seller", "vendor_id"].unique()
+    if len(seller_ids) > 0:
+        try:
+            from pyathena import connect as athena_connect
+            import boto3
+
+            session = boto3.Session(profile_name="prod-ziyi.fang-406921510350")
+            credentials = session.get_credentials().get_frozen_credentials()
+            athena_conn = athena_connect(
+                aws_access_key_id=credentials.access_key,
+                aws_secret_access_key=credentials.secret_key,
+                aws_session_token=credentials.token,
+                region_name=os.getenv("ATHENA_REGION", "us-west-2"),
+                work_group=os.getenv("ATHENA_WORK_GROUP", "ziyi.fang"),
+                s3_staging_dir=os.getenv("ATHENA_S3_STAGING", "s3://aws-athena-query-results-us-west-2-654654218498/"),
+            )
+
+            # Primary source: dwb_bi_vendor_region_info (same as Tableau)
+            am_df = pd.read_sql("""
+                SELECT CAST(vendor_id AS INTEGER) AS seller_id,
+                       lower(trim("2024_am")) AS am_name
+                FROM dwb_bi.dwb_bi_vendor_region_info
+                WHERE "2024_am" IS NOT NULL AND trim("2024_am") != ''
+            """, athena_conn)
+
+            # Fallback source: admin_seller (active AMs only, for sellers not in dwb_bi)
+            admin_am_df = pd.read_sql("""
+                SELECT CAST(a.seller_id AS INTEGER) AS seller_id,
+                       lower(trim(u.user_name)) AS am_name
+                FROM yamibuy_central.admin_seller a
+                JOIN yamibuy_master.xysc_admin_user u ON u.user_id = a.user_id
+                WHERE u.is_active = 1
+            """, athena_conn)
+
+            # Merge: use dwb_bi as primary, admin_seller fills gaps
+            # For admin_seller, deduplicate by taking first AM per seller
+            admin_am_dedup = admin_am_df.drop_duplicates(subset=["seller_id"], keep="first")
+            # Only keep sellers NOT already in dwb_bi
+            gap_sellers = admin_am_dedup[~admin_am_dedup["seller_id"].isin(am_df["seller_id"])]
+            am_df = pd.concat([am_df, gap_sellers], ignore_index=True)
+
+            # Cache to local CSV
+            cache_dir = Path(__file__).parent / "cache"
+            cache_dir.mkdir(exist_ok=True)
+            am_df.to_csv(cache_dir / "seller_am.csv", index=False)
+
+        except Exception:
+            # Fallback to cached CSV
+            cache_file = Path(__file__).parent / "cache" / "seller_am.csv"
+            if cache_file.exists():
+                am_df = pd.read_csv(cache_file)
+            else:
+                am_df = pd.DataFrame(columns=["seller_id", "am_name"])
+
+        if not am_df.empty:
+            am_df = am_df.dropna(subset=["seller_id", "am_name"])
+            am_df["seller_id"] = am_df["seller_id"].astype(int)
+            seller_mask = df["business_type"] == "Seller"
+            for sid in df.loc[seller_mask, "vendor_id"].unique():
+                sid_rows = am_df[am_df["seller_id"] == sid]
+                if sid_rows.empty:
+                    continue
+                am_name = _normalize_am_name(sid_rows.iloc[0]["am_name"])
+                df.loc[seller_mask & (df["vendor_id"] == sid), "pm_am"] = am_name
+
+    return df
 
 
 def load_data_from_db(
@@ -533,6 +806,13 @@ def load_data_from_db(
 
     # Select final output columns
     df = _select_output_columns(df)
+
+    # Load owner (PM for Vendor, AM for Seller)
+    try:
+        df = _load_owner_info(engine, df)
+    except Exception:
+        # If owner lookup fails, just add empty column
+        df["pm_am"] = ""
 
     # Ensure proper types
     df["vendor_id"] = df["vendor_id"].astype(int)
@@ -660,6 +940,8 @@ def load_inactive_vendors(
       AND ppo.in_dtm < '{end_date.isoformat()}'
       AND pv.vendor_name IS NOT NULL
       AND pv.vendor_name NOT LIKE '%测试%'
+  AND pv.vendor_name NOT LIKE '%test%'
+  AND pv.vendor_name NOT LIKE '%testing%'
       AND pv.vendor_id NOT IN (
           SELECT DISTINCT ppo2.vendor_id
           FROM yamibuy_wh.wh_inbound_batch ibb
@@ -684,6 +966,8 @@ def load_inactive_vendors(
       AND wss.in_dtm < '{end_date.isoformat()}'
       AND seller.vendor_name IS NOT NULL
       AND seller.vendor_name NOT LIKE '%测试%'
+  AND seller.vendor_name NOT LIKE '%test%'
+  AND seller.vendor_name NOT LIKE '%testing%'
       AND wss.seller_id NOT IN (
           SELECT DISTINCT wss2.seller_id
           FROM yamibuy_wh.wh_inbound_batch ibb
